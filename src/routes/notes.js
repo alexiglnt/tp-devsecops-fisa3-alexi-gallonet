@@ -1,5 +1,7 @@
 const express = require('express');
-const { exec } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const db = require('../db');
 const auth = require('../middleware/auth');
 
@@ -26,11 +28,53 @@ router.get('/search', auth, (req, res) => {
   res.json(results);
 });
 
+// Évalue une expression arithmétique simple (chiffres et + - * / ( ) uniquement)
+function calculate(expression) {
+  if (typeof expression !== 'string' || !/^[\d\s+\-*/().]+$/.test(expression)) {
+    throw new Error('invalid expression');
+  }
+  const tokens = expression.match(/\d+(?:\.\d+)?|[+\-*/()]/g) || [];
+  let pos = 0;
+
+  const parseExpr = () => {
+    let value = parseTerm();
+    while (tokens[pos] === '+' || tokens[pos] === '-') {
+      const op = tokens[pos++];
+      const right = parseTerm();
+      value = op === '+' ? value + right : value - right;
+    }
+    return value;
+  };
+  const parseTerm = () => {
+    let value = parseFactor();
+    while (tokens[pos] === '*' || tokens[pos] === '/') {
+      const op = tokens[pos++];
+      const right = parseFactor();
+      value = op === '*' ? value * right : value / right;
+    }
+    return value;
+  };
+  const parseFactor = () => {
+    const token = tokens[pos++];
+    if (token === '-') return -parseFactor();
+    if (token === '(') {
+      const value = parseExpr();
+      if (tokens[pos++] !== ')') throw new Error('invalid expression');
+      return value;
+    }
+    const num = parseFloat(token);
+    if (Number.isNaN(num)) throw new Error('invalid expression');
+    return num;
+  };
+
+  const result = parseExpr();
+  if (pos !== tokens.length) throw new Error('invalid expression');
+  return result;
+}
+
 router.post('/calc', (req, res) => {
-  const { expression } = req.body;
   try {
-    const result = eval(expression);
-    res.json({ result });
+    res.json({ result: calculate(req.body.expression) });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -67,8 +111,10 @@ router.post('/:id/export', auth, (req, res) => {
   const note = db.get('notes').find({ id: req.params.id }).value();
   if (!note) return res.status(404).json({ error: 'not found' });
 
-  const filename = req.body.filename || note.title;
-  exec(`echo "${note.content}" > /tmp/${filename}.txt`, (err) => {
+  // Nom de fichier restreint à une liste blanche : pas de shell, pas de path traversal
+  const requested = String(req.body.filename || note.title);
+  const filename = path.basename(requested).replace(/[^a-zA-Z0-9_-]/g, '_');
+  fs.writeFile(path.join(os.tmpdir(), `${filename}.txt`), String(note.content), (err) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json({ status: 'exported', file: `${filename}.txt` });
   });
